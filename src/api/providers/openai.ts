@@ -34,40 +34,69 @@ export class OpenAiHandler implements ApiHandler {
 
 	// Include stream_options for OpenAI Compatible providers if the checkbox is checked
 	async *createMessage(systemPrompt: string, messages: Anthropic.Messages.MessageParam[]): ApiStream {
-		const openAiMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-			{ role: "system", content: systemPrompt },
-			...convertToOpenAiMessages(messages),
-		]
 		const modelInfo = this.getModel().info
-		const requestOptions: OpenAI.Chat.ChatCompletionCreateParams = {
-			model: this.options.openAiModelId ?? "",
-			messages: openAiMessages,
-			temperature: 0,
-			stream: true,
-		}
-		if (this.options.includeMaxTokens) {
-			requestOptions.max_tokens = modelInfo.maxTokens
-		}
 
-		if (this.options.includeStreamOptions ?? true) {
-			requestOptions.stream_options = { include_usage: true }
-		}
+		if (this.options.openAiStreamingEnabled ?? true) {
+			const systemMessage: OpenAI.Chat.ChatCompletionSystemMessageParam = {
+				role: "system",
+				content: systemPrompt
+			}
+			const requestOptions: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
+				model: this.getModel().id,
+				temperature: 0,
+				messages: [systemMessage, ...convertToOpenAiMessages(messages)],
+				stream: true as const,
+				stream_options: { include_usage: true },
+			}
+			if (this.options.includeMaxTokens) {
+				requestOptions.max_tokens = modelInfo.maxTokens
+			}
 
-		const stream = await this.client.chat.completions.create(requestOptions)
-		for await (const chunk of stream) {
-			const delta = chunk.choices[0]?.delta
-			if (delta?.content) {
-				yield {
-					type: "text",
-					text: delta.content,
+			const stream = await this.client.chat.completions.create(requestOptions)
+
+			for await (const chunk of stream) {
+				const delta = chunk.choices[0]?.delta
+				if (delta?.content) {
+					yield {
+						type: "text",
+						text: delta.content,
+					}
+				}
+
+				// contains a null value except for the last chunk which contains the token usage statistics for the entire request
+				if (chunk.usage) {
+					yield {
+						type: "usage",
+						inputTokens: chunk.usage.prompt_tokens || 0,
+						outputTokens: chunk.usage.completion_tokens || 0,
+					}
 				}
 			}
-			if (chunk.usage) {
-				yield {
-					type: "usage",
-					inputTokens: chunk.usage.prompt_tokens || 0,
-					outputTokens: chunk.usage.completion_tokens || 0,
-				}
+		} else {
+			const systemMessage: OpenAI.Chat.ChatCompletionSystemMessageParam = {
+				role: "system",
+				content: systemPrompt
+			}
+			const requestOptions: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
+				model: this.getModel().id,
+				messages: [systemMessage, ...convertToOpenAiMessages(messages)],
+				stream: false as const,
+				temperature: 0,
+			}
+			if (this.options.includeMaxTokens) {
+				requestOptions.max_tokens = modelInfo.maxTokens
+			}
+
+			const response = await this.client.chat.completions.create(requestOptions)
+			
+			yield {
+				type: "text",
+				text: response.choices[0]?.message.content || "",
+			}
+			yield {
+				type: "usage",
+				inputTokens: response.usage?.prompt_tokens || 0,
+				outputTokens: response.usage?.completion_tokens || 0,
 			}
 		}
 	}
